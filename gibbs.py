@@ -1,27 +1,24 @@
-import numpy as np
-from tqdm import tqdm
+import jax
+import jax.numpy
 import cond_posteriors as cp
 
 k = 100
 
+OP_key = jax.random.PRNGKey(0)
+
 
 def gibbs_per_block(X, Y, init, ITERATION=200, BURNIN_period=100):
-    R2_vs = np.zeros((ITERATION,))
-    q_vs = np.zeros((ITERATION,))
-    z_vs = np.zeros((ITERATION, k))
-    sigma2_vs = np.zeros((ITERATION,))
-    beta_tilde_vs = np.zeros((ITERATION, k))
+    # z_v, beta_v, sigma2_v, q_v = init
 
-    z_v, beta_v, sigma2_v, q_v = init
-    for n in tqdm(range(ITERATION + BURNIN_period)):
-        R2_v, q_v = cp.R2q(X, z_v, beta_v, sigma2_v)()
-        z_v = cp.z(Y, X, R2_v, q_v)(z_v)
-        sigma2_v = cp.sigma2(Y, X, R2_v, q_v, z_v)
-        beta_v_tilde = cp.betatilde(Y, X, R2_v, q_v, sigma2_v, z_v)
-        if n >= BURNIN_period:
-            R2_vs[n - BURNIN_period] = R2_v
-            q_vs[n - BURNIN_period] = q_v
-            z_vs[n - BURNIN_period] = z_v
-            sigma2_vs[n - BURNIN_period] = sigma2_v
-            beta_tilde_vs[n - BURNIN_period] = beta_v_tilde
-    return R2_vs, q_vs, z_vs, sigma2_vs, beta_v_tilde
+    def iter_gibbs(inps, key):
+        q_v, R2_v, z_v, beta_v, sigma2_v = inps
+        key1, key2, key3, key4 = jax.random.split(key, 4)
+        R2_v, q_v = cp.R2q(key1, X, z_v, beta_v, sigma2_v)()
+        z_v = cp.z(key2, Y, X, R2_v, q_v)(z_v)
+        sigma2_v = cp.sigma2(key3, Y, X, R2_v, q_v, z_v)
+        beta_v = cp.betatilde(key4, Y, X, R2_v, q_v, sigma2_v, z_v)
+        return None, (q_v, R2_v, z_v, beta_v, sigma2_v)
+
+    keys = jax.random.split(OP_key, 110000)
+    _, out = jax.lax.scan(iter_gibbs, (None, None, *init), keys)
+    return out
