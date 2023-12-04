@@ -64,4 +64,4 @@ def initialize_parameters(X, Y):
     q = np.sum(z) / len(z)
     print("q init:", q)
     # gamma2 = np.var(beta[z.astype(bool)]) / sigma2
-    return z, beta, sigma2, q
+    return z, beta, sigma2
