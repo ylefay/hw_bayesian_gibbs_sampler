@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+from functools import partial
 
 jax.config.update("jax_enable_x64", True)
 k = 100
@@ -137,7 +138,7 @@ def gamma2(R2_v, q_v, X):
 
 def Wtilde(Xtilde_v, sz_v, gamma2_v):
     prod = Xtilde_v.T @ Xtilde_v
-    return prod + jnp.eye(k) / gamma2_v, prod + jnp.diag(jnp.where(jnp.arange(k) < sz_v, 1.0, 0.0)) / gamma2_v
+    return prod + jnp.eye(k) / gamma2_v
 
 
 def Xtilde(X, z_v):
@@ -148,14 +149,15 @@ def Xtilde(X, z_v):
         return (j, _X), None
 
     res, _ = jax.lax.scan(iter, (0, jnp.zeros((T, k))), jnp.arange(k))
-    _, X = res
-    return X, jnp.where(z_v == True, X, 0)
+    _, X_out = res
+    return X_out
 
 
 def betahat(Wtilde_v, Xtilde_v, Y):
-    return jnp.linalg.pinv(Wtilde_v) @ Xtilde_v.T @ Y
+    return jnp.linalg.solve(Wtilde_v, Xtilde_v.T @ Y)
 
 
+@jax.jit
 def R2q(OP_key, X, z, beta_v, sigma2_v):
     sz_v = sz(z)
     bz = beta_v @ jnp.diag(z) @ beta_v.T
@@ -180,6 +182,7 @@ def R2q(OP_key, X, z, beta_v, sigma2_v):
         cdf = jnp.cumsum(weights)
         return cdf
 
+    @partial(jax.jit, static_argnums=(0,))
     def invCDF(cdf, u):
         index = jax.lax.cond(
             jnp.any(cdf >= u),
@@ -192,6 +195,7 @@ def R2q(OP_key, X, z, beta_v, sigma2_v):
 
     cdfq = cdf(univariate_pdf)
 
+    @jax.jit
     def sampleqR():
         uv = jax.random.uniform(OP_key, shape=(2,))
         q_ = invCDF(cdfq, uv.at[0].get())
@@ -209,13 +213,18 @@ def z(OP_key, Y, X, R2_v, q_v, z_v):
 
     def logpdf(z_v):
         sz_v = sz(z_v)
-        Xtilde_v, _ = Xtilde(X, z_v)
-        Wtilde_v_for_det, Wtilde_v = Wtilde(Xtilde_v, sz_v, gamma2_v)
-        betahat_v = betahat(Wtilde_v, Xtilde_v, Y)
+        Xtilde_v = Xtilde(X, z_v)
+        Wtilde_v_for_det = Wtilde(Xtilde_v, sz_v, gamma2_v)
+        betahat_v = betahat(Wtilde_v_for_det, Xtilde_v, Y)
         _, logdet = jnp.linalg.slogdet(Wtilde_v_for_det)
+
+        # _, logdet = jnp.linalg.slogdet(jnp.linalg.cholesky(Wtilde_v_for_det))
+        # logdet *= 2
+
+        # logdet = jnp.sum(jnp.log(jnp.diag(Wtilde_v_for_det)))
         logdet += (k - sz_v) * jnp.log(gamma2_v)
         logp = sz_v * (jnp.log(q_v) - jnp.log(1 - q_v)) - sz_v / 2 * jnp.log(gamma2_v) - 1 / 2 * logdet \
-               - T / 2 * jnp.log((Y.T @ Y - betahat_v.T @ Wtilde_v @ betahat_v) / 2)
+               - T / 2 * jnp.log((Y.T @ Y - betahat_v.T @ Wtilde_v_for_det @ betahat_v) / 2)
         return logp
 
     def logpdf_exclusion(index, z):
@@ -243,26 +252,28 @@ def z(OP_key, Y, X, R2_v, q_v, z_v):
     return gibbs(z_v)
 
 
+@jax.jit
 def sigma2(OP_key, Y, X, R2_v, q_v, z):
     sz_v = sz(z)
     gamma2_v = gamma2(R2_v, q_v, X)
-    Xtilde_v, _ = Xtilde(X, z)
-    Wtilde_v_for_det, Wtilde_v = Wtilde(Xtilde_v, sz_v, gamma2_v)
-    betahat_v = betahat(Wtilde_v, Xtilde_v, Y)
+    Xtilde_v = Xtilde(X, z)
+    Wtilde_v_for_det = Wtilde(Xtilde_v, sz_v, gamma2_v)
+    betahat_v = betahat(Wtilde_v_for_det, Xtilde_v, Y)
     form = T / 2
-    param = (Y.T @ Y - betahat_v.T @ Wtilde_v @ betahat_v) / 2
+    param = (Y.T @ Y - betahat_v.T @ Wtilde_v_for_det @ betahat_v) / 2
     scale = 1 / param
     # Lorsqu'on regroupera, toute cette initialisation de variables _v ne sera évidemment à faire qu'une fois.
     return 1 / (jax.random.gamma(OP_key, a=form) * scale)  # Ytilde=Y
 
 
+@jax.jit
 def betatilde(OP_key, Y, X, R2_v, q_v, sigma2_v, z_v):
     sz_v = sz(z_v)
     gamma2_v = gamma2(R2_v, q_v, X)
-    Xtilde_v, _ = Xtilde(X, z_v)
+    Xtilde_v = Xtilde(X, z_v)
     id = jnp.eye(k)
-    Wtilde_v_p, Wtilde_v = Wtilde(Xtilde_v, sz_v, gamma2_v)
-    invTerm = jnp.linalg.pinv(Wtilde_v)
+    Wtilde_v_p = Wtilde(Xtilde_v, sz_v, gamma2_v)
+    invTerm = jnp.linalg.pinv(Wtilde_v_p)
     mean = invTerm @ Xtilde_v.T @ Y  # Pas de U*phi
     cov = invTerm * sigma2_v
     sample = mean + jnp.linalg.cholesky(cov) @ jax.random.normal(OP_key, shape=(k,))
