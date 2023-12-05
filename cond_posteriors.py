@@ -137,25 +137,23 @@ def gamma2(R2_v, q_v, X):
 
 def Wtilde(Xtilde_v, sz_v, gamma2_v):
     prod = Xtilde_v.T @ Xtilde_v
-    return prod + jnp.eye(k) / gamma2_v, prod + jnp.diag(jnp.where(jnp.arange(k) <= sz_v, 1.0, 0.0)) / gamma2_v
+    return prod + jnp.eye(k) / gamma2_v, prod + jnp.diag(jnp.where(jnp.arange(k) < sz_v, 1.0, 0.0)) / gamma2_v
 
 
 def Xtilde(X, z_v):
     def iter(inps, i):
         j, _X = inps
-        _X, i, j = jax.lax.cond(z_v.at[i].get() == 1, lambda _: (_X.at[:, j].set(X.at[:, i].get()), i + 1, j + 1),
+        _X, i, j = jax.lax.cond(z_v.at[i].get() == True, lambda _: (_X.at[:, j].set(X.at[:, i].get()), i + 1, j + 1),
                                 lambda _i: (_X, i + 1, j), None)
         return (j, _X), None
 
     res, _ = jax.lax.scan(iter, (0, jnp.zeros((T, k))), jnp.arange(k))
     _, X = res
-    return X, jnp.where(z == 1, X, 0)
+    return X, jnp.where(z_v == True, X, 0)
 
 
 def betahat(Wtilde_v, Xtilde_v, Y):
-    WtildeinvXtilde_v = jnp.linalg.solve(Wtilde_v, Xtilde_v.T)
-    betahat_v = WtildeinvXtilde_v @ Y
-    return betahat_v
+    return jnp.linalg.pinv(Wtilde_v) @ Xtilde_v.T @ Y
 
 
 def R2q(OP_key, X, z, beta_v, sigma2_v):
@@ -184,8 +182,8 @@ def R2q(OP_key, X, z, beta_v, sigma2_v):
 
     def invCDF(cdf, u):
         index = jax.lax.cond(
-            jnp.any(cdf <= u),
-            lambda _: jnp.argmax(cdf <= u),
+            jnp.any(cdf >= u),
+            lambda _: jnp.argmax(cdf >= u),
             lambda _: jnp.argmax(cdf),  # If u is larger than any element in cdf, return the last index.
             operand=None
         )
@@ -202,10 +200,11 @@ def R2q(OP_key, X, z, beta_v, sigma2_v):
         R_ = invCDF(cdfRconditiononq, uv.at[1].get())
         return q_, R_
 
-    return sampleqR  # function that will be looped over to generate samples of (q, R) given X z
+    return sampleqR()  # function that will be looped over to generate samples of (q, R) given X z
 
 
-def z(OP_key, Y, X, R2_v, q_v):
+@jax.jit
+def z(OP_key, Y, X, R2_v, q_v, z_v):
     gamma2_v = gamma2(R2_v, q_v, X)
 
     def logpdf(z_v):
@@ -220,9 +219,9 @@ def z(OP_key, Y, X, R2_v, q_v):
         return logp
 
     def logpdf_exclusion(index, z):
-        logp = logpdf(z)
         logp0 = logpdf(z.at[index].set(0))
         logp1 = logpdf(z.at[index].set(1))
+        logp = jax.lax.cond(z.at[index].get() == True, lambda _: logp1, lambda _: logp0, None)
         return logp - jnp.logaddexp(logp0, logp1)
         # return logp - jnp.logaddexp(logp0 + jnp.log(q_v), logp1 + jnp.log(1 - q_v))
 
@@ -241,7 +240,7 @@ def z(OP_key, Y, X, R2_v, q_v):
         z, _ = jax.lax.scan(iter, z, jnp.arange(k))
         return z
 
-    return gibbs
+    return gibbs(z_v)
 
 
 def sigma2(OP_key, Y, X, R2_v, q_v, z):
@@ -263,7 +262,7 @@ def betatilde(OP_key, Y, X, R2_v, q_v, sigma2_v, z_v):
     Xtilde_v, _ = Xtilde(X, z_v)
     id = jnp.eye(k)
     Wtilde_v_p, Wtilde_v = Wtilde(Xtilde_v, sz_v, gamma2_v)
-    invTerm = jnp.linalg.pinv(Wtilde_v_p)
+    invTerm = jnp.linalg.pinv(Wtilde_v)
     mean = invTerm @ Xtilde_v.T @ Y  # Pas de U*phi
     cov = invTerm * sigma2_v
     sample = mean + jnp.linalg.cholesky(cov) @ jax.random.normal(OP_key, shape=(k,))
@@ -271,7 +270,7 @@ def betatilde(OP_key, Y, X, R2_v, q_v, sigma2_v, z_v):
     def reconstruct_beta_v():
         def iter(inps, i):
             j, _beta_v = inps
-            _beta_v, i, j = jax.lax.cond(z_v.at[i].get() == 1,
+            _beta_v, i, j = jax.lax.cond(z_v.at[i].get() == True,
                                          lambda _: (_beta_v.at[i].set(sample.at[j].get()), i + 1, j + 1),
                                          lambda _i: (_beta_v, i + 1, j), None)
             return (j, _beta_v), None
