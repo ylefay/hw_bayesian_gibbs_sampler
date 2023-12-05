@@ -8,11 +8,11 @@ import jax.numpy as jnp
 
 k = 100
 s_list = [5]
-Ry_list = [0.25]
-no_datasets = 10
+Ry_list = [0.6]
+no_datasets = 1
 datasetsX, datasets = generate_dataset(s_list, Ry_list, no_datasets)
 
-ITERATION = 100
+ITERATION = 2000
 
 res = dict()
 for i in datasets.keys():
@@ -21,12 +21,12 @@ for i in datasets.keys():
     for (s, Ry) in dataset.keys():
         Y, beta_v, z_v, sigma2_v, q_v = dataset[(s, Ry)]
         # init = z_v, beta_v, sigma2_v, q_v
-        z, beta, sigma2 = initialize_parameters(X, Y)
+        q, z, beta, sigma2 = initialize_parameters(X, Y)
         X = jnp.array(X)
         Y = jnp.array(Y)
         z = jnp.array(z)
         beta = jnp.array(beta)
-        init = (z, beta, sigma2)
+        init = (q, z, beta, sigma2)
         with jax.disable_jit(False):
             res_gibbs = gibbs_per_block(X, Y, init, ITERATION=ITERATION)
         with open(f'out_{i}_{s}_{Ry}.pickle', 'wb') as handle:

@@ -124,16 +124,16 @@ surface = jnp.array([0.000998, 0.000998, 0.000998, 0.000998, 0.000998,
                      0.00099799, 0.00099799, 0.00099799, 0.00099799])
 
 
-def sz(z):
-    return jnp.sum(z)
+def sz(z_v):
+    return jnp.sum(z_v)
 
 
 def vbar(X):
     return jnp.mean(jnp.var(X, axis=0))
 
 
-def gamma2(R2_v, q_v, X):
-    return R2_v / (q_v * k * vbar(X) * (1 - R2_v))
+def gamma2(R2_v, q_v, vbarX_v):
+    return R2_v / (q_v * k * vbarX_v * (1 - R2_v))
 
 
 def Wtilde(Xtilde_v, sz_v, gamma2_v):
@@ -161,11 +161,10 @@ def betahat(Wtilde_v, Xtilde_v, Y):
 def R2q(OP_key, X, z, beta_v, sigma2_v):
     sz_v = sz(z)
     bz = beta_v @ jnp.diag(z) @ beta_v.T
-    # bz = jnp.einsum('i, i ->', beta_v ** 2, z)
     vbarX_v = vbar(X)
 
     def joint_pdf(q_v, R2_v):
-        return jnp.exp((-1 / (2 * sigma2_v)) * (k * vbarX_v * q_v * ((1 - R2_v) / R2_v) * bz)) * q_v ** (
+        return jnp.exp((-bz / (2 * sigma2_v * gamma2(R2_v, q_v, vbarX_v)))) * q_v ** (
                 3 / 2 * sz_v + a - 1) * (
                        1 - q_v) ** (k - sz_v + b - 1) * R2_v ** (A - 1 - sz_v / 2) * (1 - R2_v) ** (sz_v / 2 + B - 1)
 
@@ -177,9 +176,8 @@ def R2q(OP_key, X, z, beta_v, sigma2_v):
 
     def cdf(pdf):
         weights = pdf(grid) * surface
-        normalize_constant = jnp.sum(weights)
-        weights /= normalize_constant
         cdf = jnp.cumsum(weights)
+        cdf /= cdf[-1]
         return cdf
 
     @partial(jax.jit, static_argnums=(0,))
@@ -191,51 +189,61 @@ def R2q(OP_key, X, z, beta_v, sigma2_v):
             operand=None
         )
         return grid.at[index].get()
-        # return grid[jnp.where(cdf < u)[0][-1]]
 
     cdfq = cdf(univariate_pdf)
 
     @jax.jit
     def sampleqR():
         uv = jax.random.uniform(OP_key, shape=(2,))
-        q_ = invCDF(cdfq, uv.at[0].get())
+        q = invCDF(cdfq, uv.at[0].get())
 
-        cdfRconditiononq = cdf(lambda R: joint_pdf(q_, R))
-        R_ = invCDF(cdfRconditiononq, uv.at[1].get())
-        return q_, R_
+        cdfRconditiononq = cdf(lambda R2: joint_pdf(q, R2))
+        R2 = invCDF(cdfRconditiononq, uv.at[1].get())
+        return R2, q
 
     return sampleqR()  # function that will be looped over to generate samples of (q, R) given X z
 
 
 @jax.jit
 def z(OP_key, Y, X, R2_v, q_v, z_v):
-    gamma2_v = gamma2(R2_v, q_v, X)
+    gamma2_v = gamma2(R2_v, q_v, vbar(X))
 
-    def logpdf(z_v):
+    def pdf_ratio(index, z_v):
+        """
+        Computhe the logratio up to proportionaly of P(Z_i = 1, Z_{-i}) / P(Z_i = 0, Z_{-i})
+        """
+        z_v = z_v.at[index].set(0)
         sz_v = sz(z_v)
-        Xtilde_v = Xtilde(X, z_v)
-        Wtilde_v_for_det = Wtilde(Xtilde_v, sz_v, gamma2_v)
-        betahat_v = betahat(Wtilde_v_for_det, Xtilde_v, Y)
-        _, logdet = jnp.linalg.slogdet(Wtilde_v_for_det)
 
-        # _, logdet = jnp.linalg.slogdet(jnp.linalg.cholesky(Wtilde_v_for_det))
-        # logdet *= 2
+        Xtilde_v0 = Xtilde(X, z_v)
+        Wtilde_v0_for_det = Wtilde(Xtilde_v0, sz_v, gamma2_v)
+        betahat_v0 = betahat(Wtilde_v0_for_det, Xtilde_v0, Y)
+        _, logdet0 = jnp.linalg.slogdet(Wtilde_v0_for_det)
 
-        # logdet = jnp.sum(jnp.log(jnp.diag(Wtilde_v_for_det)))
-        logdet += (k - sz_v) * jnp.log(gamma2_v)
-        logp = sz_v * (jnp.log(q_v) - jnp.log(1 - q_v)) - sz_v / 2 * jnp.log(gamma2_v) - 1 / 2 * logdet \
-               - T / 2 * jnp.log((Y.T @ Y - betahat_v.T @ Wtilde_v_for_det @ betahat_v) / 2)
-        return logp
+        z_v = z_v.at[index].set(1)
+        sz_v += 1
+        Xtilde_v1 = Xtilde(X, z_v)
+        Wtilde_v1_for_det = Wtilde(Xtilde_v1, sz_v, gamma2_v)
+        betahat_v1 = betahat(Wtilde_v1_for_det, Xtilde_v1, Y)
+        _, logdet1 = jnp.linalg.slogdet(Wtilde_v1_for_det)
 
-    def logpdf_exclusion(index, z):
-        logp0 = logpdf(z.at[index].set(0))
-        logp1 = logpdf(z.at[index].set(1))
-        logp = jax.lax.cond(z.at[index].get() == True, lambda _: logp1, lambda _: logp0, None)
-        return logp - jnp.logaddexp(logp0, logp1)
-        # return logp - jnp.logaddexp(logp0 + jnp.log(q_v), logp1 + jnp.log(1 - q_v))
+        Ysquared = Y.T @ Y
 
-    def pdf_exclusion(i, z):
-        return jnp.exp(logpdf_exclusion(i, z))
+        log_ratio = jnp.log(q_v) - jnp.log(1 - q_v) - 1 / 2 * jnp.log(gamma2_v) - 1 / 2 * (logdet1 - logdet0) - \
+                    T / 2 * (jnp.log(Ysquared - betahat_v1.T @ Wtilde_v1_for_det @ betahat_v1) - jnp.log(
+            Ysquared - betahat_v0.T @ Wtilde_v0_for_det @ betahat_v0))
+        log_ratio += -jnp.log(gamma2_v)  # correction due to constant size matrix
+        ratio = jnp.exp(log_ratio)
+        return ratio
+
+    def pdf_exclusion(index, z):
+        """
+        P(z_i | z_{-i}) = 1 / (1+P(z_i | z_{-i})/P(1-z_i | z_{-i}))
+        """
+        ratio = pdf_ratio(index, z)
+        zi = z.at[index].get()
+        return jax.lax.cond(zi == 0, lambda _: jnp.exp(-jnp.log1p(ratio)), lambda _: jnp.exp(-jnp.log1p(1 / ratio)),
+                            None)
 
     def gibbs(z):
         u = jax.random.uniform(OP_key, shape=(k,))
@@ -255,7 +263,7 @@ def z(OP_key, Y, X, R2_v, q_v, z_v):
 @jax.jit
 def sigma2(OP_key, Y, X, R2_v, q_v, z):
     sz_v = sz(z)
-    gamma2_v = gamma2(R2_v, q_v, X)
+    gamma2_v = gamma2(R2_v, q_v, vbar(X))
     Xtilde_v = Xtilde(X, z)
     Wtilde_v_for_det = Wtilde(Xtilde_v, sz_v, gamma2_v)
     betahat_v = betahat(Wtilde_v_for_det, Xtilde_v, Y)
@@ -269,7 +277,7 @@ def sigma2(OP_key, Y, X, R2_v, q_v, z):
 @jax.jit
 def betatilde(OP_key, Y, X, R2_v, q_v, sigma2_v, z_v):
     sz_v = sz(z_v)
-    gamma2_v = gamma2(R2_v, q_v, X)
+    gamma2_v = gamma2(R2_v, q_v, vbar(X))
     Xtilde_v = Xtilde(X, z_v)
     id = jnp.eye(k)
     Wtilde_v_p = Wtilde(Xtilde_v, sz_v, gamma2_v)

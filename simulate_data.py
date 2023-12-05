@@ -37,7 +37,7 @@ def generate_dataset(s_list, Ry_list, no_datasets):
     for i in range(no_datasets):
         datasets[i] = dict()
         X = X_data()
-        X = (X - np.mean(X, axis=0)) / np.std(X, axis=0) #standardize the data
+        X = (X - np.mean(X, axis=0)) / np.std(X, axis=0)  # standardize the data
         datasets_X[i] = X
         for s in s_list:
             for Ry in Ry_list:
@@ -63,5 +63,5 @@ def initialize_parameters(X, Y):
     z = np.where(beta != 0, True, False)
     q = np.sum(z) / len(z)
     print("q init:", q)
-    # gamma2 = np.var(beta[z.astype(bool)]) / sigma2
-    return z, beta, sigma2
+    gamma2 = np.var(beta[z.astype(bool)]) / sigma2
+    return q, z, beta, sigma2
